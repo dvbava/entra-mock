@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS auth_codes (
   nonce TEXT,
   code_challenge TEXT,
   code_challenge_method TEXT,
+  sid TEXT,
   expires_at INTEGER NOT NULL
 );
 
@@ -101,7 +102,18 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   client_id TEXT NOT NULL REFERENCES apps(client_id) ON DELETE CASCADE,
   user_id TEXT NOT NULL REFERENCES users(oid) ON DELETE CASCADE,
   scope TEXT NOT NULL,
+  sid TEXT,
   expires_at INTEGER NOT NULL
+);
+
+-- Browser SSO sessions: one row per (browser session cookie, signed-in user). Powers prompt=none silent sign-in.
+CREATE TABLE IF NOT EXISTS sso_sessions (
+  session_id TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(oid) ON DELETE CASCADE,
+  sid TEXT NOT NULL UNIQUE,
+  signed_in_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, user_id)
 );
 `;
 
@@ -123,6 +135,11 @@ export function openStore({ dataDir }) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Databases created before SSO sessions existed lack the sid columns
+  for (const table of ['auth_codes', 'refresh_tokens']) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!cols.some((c) => c.name === 'sid')) db.exec(`ALTER TABLE ${table} ADD COLUMN sid TEXT`);
+  }
 
   // node:sqlite has no transaction helper; this one commits on success, rolls back on error, and nests safely
   let txDepth = 0;
@@ -314,7 +331,7 @@ export function openStore({ dataDir }) {
 
     reset() {
       tx(() => {
-        for (const t of ['auth_codes', 'refresh_tokens', 'service_accounts', 'apps', 'users']) run(`DELETE FROM ${t}`);
+        for (const t of ['auth_codes', 'refresh_tokens', 'sso_sessions', 'service_accounts', 'apps', 'users']) run(`DELETE FROM ${t}`);
       });
       seedDefaults();
     },
@@ -384,8 +401,8 @@ export function openStore({ dataDir }) {
     // ----- protocol state (persisted so sessions survive a restart) -----
     putCode(code, e) {
       run(
-        'INSERT INTO auth_codes (code, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        code, e.clientId, e.userId, e.redirectUri, e.scope, e.nonce || null, e.codeChallenge || null, e.codeChallengeMethod || null, e.expiresAt
+        'INSERT INTO auth_codes (code, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, sid, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        code, e.clientId, e.userId, e.redirectUri, e.scope, e.nonce || null, e.codeChallenge || null, e.codeChallengeMethod || null, e.sid || null, e.expiresAt
       );
     },
     /** Returns the code's entry and deletes it (authorization codes are single use). */
@@ -403,23 +420,44 @@ export function openStore({ dataDir }) {
           nonce: r.nonce ?? '',
           codeChallenge: r.code_challenge ?? '',
           codeChallengeMethod: r.code_challenge_method ?? 'plain',
+          sid: r.sid ?? '',
         };
       });
     },
-    putRefresh: (token, e) => run('INSERT INTO refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?)', token, e.clientId, e.userId, e.scope, e.expiresAt),
+    putRefresh: (token, e) => run('INSERT INTO refresh_tokens (token, client_id, user_id, scope, sid, expires_at) VALUES (?, ?, ?, ?, ?, ?)', token, e.clientId, e.userId, e.scope, e.sid || null, e.expiresAt),
     takeRefresh(token) {
       return tx(() => {
         const r = db.prepare('SELECT * FROM refresh_tokens WHERE token = ?').get(token);
         if (!r) return null;
         run('DELETE FROM refresh_tokens WHERE token = ?', token);
         if (r.expires_at < nowSec()) return null;
-        return { clientId: r.client_id, userId: r.user_id, scope: r.scope };
+        return { clientId: r.client_id, userId: r.user_id, scope: r.scope, sid: r.sid ?? '' };
       });
     },
     purgeExpired() {
       const t = nowSec();
       run('DELETE FROM auth_codes WHERE expires_at < ?', t);
       run('DELETE FROM refresh_tokens WHERE expires_at < ?', t);
+      run('DELETE FROM sso_sessions WHERE expires_at < ?', t);
     },
+
+    // ----- SSO sessions (the browser cookie maps to the accounts signed in on that browser) -----
+    /** Records that userId signed in on this browser session; returns that account's stable sid. */
+    signInSession(sessionId, userId, ttlSeconds) {
+      return tx(() => {
+        const existing = db.prepare('SELECT sid FROM sso_sessions WHERE session_id = ? AND user_id = ?').get(sessionId, userId);
+        const sid = existing?.sid ?? crypto.randomUUID();
+        run(
+          `INSERT INTO sso_sessions (session_id, user_id, sid, signed_in_at, expires_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, user_id) DO UPDATE SET signed_in_at = excluded.signed_in_at, expires_at = excluded.expires_at`,
+          sessionId, userId, sid, nowSec(), nowSec() + ttlSeconds
+        );
+        return sid;
+      });
+    },
+    sessionAccounts: (sessionId) =>
+      db.prepare('SELECT user_id AS userId, sid FROM sso_sessions WHERE session_id = ? AND expires_at >= ? ORDER BY signed_in_at DESC, rowid DESC').all(sessionId, nowSec()),
+    endSession: (sessionId) => run('DELETE FROM sso_sessions WHERE session_id = ?', sessionId).changes,
+    endAllSessions: () => run('DELETE FROM sso_sessions').changes,
   };
 }

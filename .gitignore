@@ -157,3 +157,4 @@ vite.config.ts.timestamp-*
 .nx/migrate-runs
 */package-lock.json
 */entra-mock.db*
+*/*.pem

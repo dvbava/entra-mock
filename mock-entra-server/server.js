@@ -2,21 +2,37 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStore, DEFAULT_LIFETIME, MIN_LIFETIME, MAX_LIFETIME } from './store.js';
+import { ensureLocalCertificate } from './https-certificate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const ENV_FILE = path.join(__dirname, '.env');
+if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const PORT = Number(process.env.PORT) || 8080;
-const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-const DATA_DIR = process.env.DATA_DIR || __dirname;
+
+const { certPath: LOCAL_CERT_FILE, keyPath: LOCAL_KEY_FILE } = ensureLocalCertificate(__dirname);
+
+// MSAL.js only accepts https authorities, so the mock can serve TLS when given a certificate (see README)
+const resolveConfigPath = (value) => path.resolve(__dirname, value);
+const HTTPS_CERT_FILE = resolveConfigPath(process.env.HTTPS_CERT_FILE || LOCAL_CERT_FILE);
+const HTTPS_KEY_FILE = resolveConfigPath(process.env.HTTPS_KEY_FILE || LOCAL_KEY_FILE);
+const USE_HTTPS = Boolean(HTTPS_CERT_FILE && HTTPS_KEY_FILE);
+const PUBLIC_URL = (process.env.PUBLIC_URL || `${USE_HTTPS ? 'https' : 'http'}://localhost:${PORT}`).replace(/\/$/, '');
+const DATA_DIR = resolveConfigPath(process.env.DATA_DIR || '.');
 const PORTAL_DIR = path.join(__dirname, 'portal');
 
 const CODE_TTL = 600;
+const SSO_TTL = 24 * 3600; // how long a browser stays signed in for prompt=none requests
+const SSO_COOKIE = 'entra_sso';
 const REFRESH_TTL = 24 * 3600;
 const OIDC_SCOPES = new Set(['openid', 'profile', 'email', 'offline_access']);
 
@@ -42,13 +58,13 @@ function signJwt(payload) {
   return `${input}.${sig}`;
 }
 
-function verifyJwt(token) {
+function verifyJwt(token, { ignoreExp = false } = {}) {
   try {
     const [h, p, s] = String(token).split('.');
     if (!h || !p || !s) return null;
     if (!crypto.verify('RSA-SHA256', Buffer.from(`${h}.${p}`), signing.publicKey, Buffer.from(s, 'base64url'))) return null;
     const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf-8'));
-    return payload.exp > nowSec() ? payload : null;
+    return ignoreExp || payload.exp > nowSec() ? payload : null;
   } catch {
     return null;
   }
@@ -92,6 +108,21 @@ function isValidRedirect(raw) {
 function parseList(input) {
   const list = Array.isArray(input) ? input : String(input || '').split(/[,\n]/);
   return [...new Set(list.map((u) => String(u).trim()).filter(Boolean))];
+}
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** Over https the cookie is SameSite=None so silent iframes work cross-site; over http (localhost) it is Lax. */
+function ssoCookie(value, maxAge) {
+  const secure = PUBLIC_URL.startsWith('https:');
+  return `${SSO_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=${secure ? 'None; Secure' : 'Lax'}`;
 }
 
 /** Returns the validated lifetime in seconds, or an error message. */
@@ -142,7 +173,7 @@ function baseClaims(db, audienceApp) {
   };
 }
 
-function userTokens(db, { app, user, roles, scope, nonce, usedSecret }) {
+function userTokens(db, { app, user, roles, scope, nonce, usedSecret, sid }) {
   const scopes = String(scope || '').split(/\s+/).filter(Boolean);
   const scp = scopes
     .filter((s) => !OIDC_SCOPES.has(s.toLowerCase()))
@@ -161,6 +192,8 @@ function userTokens(db, { app, user, roles, scope, nonce, usedSecret }) {
     scope: scopes.join(' '),
     expires_in: app.tokenLifetimeSeconds,
     ext_expires_in: app.tokenLifetimeSeconds,
+    // MSAL.js builds the cached account's id (uid.utid) from this; without it silent calls have no account to use
+    client_info: Buffer.from(JSON.stringify({ uid: user.oid, utid: db.tenantId })).toString('base64url'),
     access_token: signJwt({
       ...baseClaims(db, app),
       azp: app.clientId,
@@ -176,6 +209,7 @@ function userTokens(db, { app, user, roles, scope, nonce, usedSecret }) {
       ...identity,
       ...(roles.length ? { roles } : {}),
       ...(nonce ? { nonce } : {}),
+      ...(sid ? { sid } : {}),
     });
   }
   return out;
@@ -259,6 +293,9 @@ admin.get('/info', (req, res) => {
 });
 
 admin.get('/state', (req, res) => done(res));
+
+// Forgets every browser sign-in, so the next prompt=none request answers login_required
+admin.delete('/sessions', (req, res) => res.json({ cleared: store.endAllSessions() }));
 
 admin.post('/reset', (req, res) => {
   store.reset();
@@ -576,6 +613,9 @@ app.all('/oidc/userinfo', (req, res) => {
 });
 
 app.get('/:tenantId/oauth2/v2.0/logout', validateTenant, (req, res) => {
+  const sessionId = parseCookies(req)[SSO_COOKIE];
+  if (sessionId) store.endSession(sessionId);
+  res.append('Set-Cookie', ssoCookie('', 0));
   const target = req.query.post_logout_redirect_uri;
   if (target && isValidRedirect(String(target))) return res.redirect(String(target));
   res.send(pageShell('Signed out', '<h1>You signed out</h1><p>You can close this window.</p>'));
@@ -617,6 +657,65 @@ function validateAuthRequest(res, db, p) {
 
 const responseMode = (p) => (['query', 'fragment', 'form_post'].includes(p.response_mode) ? p.response_mode : 'query');
 
+/**
+ * prompt=none: sign the user in without UI if this browser already has an SSO session.
+ * Mirrors Entra's outcomes: login_required (nobody signed in / hint matches no one), interaction_required
+ * (several accounts and no hint, or the account has no role on this app).
+ */
+function resolveSilentAccount(db, targetApp, p, sessionId) {
+  const fail = (error, aadsts, message) => ({ error, aadsts, message });
+  const accounts = (sessionId ? store.sessionAccounts(sessionId) : [])
+    .map((a) => ({ ...a, user: db.users.find((u) => u.oid === a.userId) }))
+    .filter((a) => a.user);
+  if (!accounts.length) {
+    return fail('login_required', '50058', 'A silent sign-in request was sent but no user is signed in. Sign in interactively first (or the SSO session ended).');
+  }
+
+  let match;
+  if (p.sid) {
+    match = accounts.find((a) => a.sid === p.sid);
+  } else if (p.id_token_hint) {
+    const claims = verifyJwt(p.id_token_hint, { ignoreExp: true });
+    match = claims && accounts.find((a) => a.userId === claims.oid);
+  } else if (p.login_hint) {
+    match = accounts.find((a) => a.user.preferred_username.toLowerCase() === p.login_hint.toLowerCase());
+  } else if (accounts.length === 1) {
+    match = accounts[0];
+  } else {
+    return fail('interaction_required', '16000', 'Several accounts are signed in on this browser and the request did not say which one (login_hint, sid or id_token_hint). Interaction is required to select an account.');
+  }
+  if (!match) return fail('login_required', '50058', 'The requested account is not signed in on this browser.');
+  if (!targetApp.assignments.some((a) => a.userId === match.userId)) {
+    return fail('interaction_required', '50105', `The signed in user is not assigned to a role for '${targetApp.name}'.`);
+  }
+  return { user: match.user, sid: match.sid };
+}
+
+/** Records the sign-in on the browser's SSO session, stores a one-time code and sends it to the app. */
+function issueAuthCode(res, targetApp, p, mode, user, knownSid, sessionId) {
+  const cookieSession = sessionId ?? null;
+  let sid = knownSid;
+  if (!sid) {
+    const id = cookieSession || crypto.randomBytes(24).toString('base64url');
+    sid = store.signInSession(id, user.oid, SSO_TTL);
+    res.append('Set-Cookie', ssoCookie(id, SSO_TTL));
+  }
+  store.purgeExpired();
+  const code = crypto.randomBytes(32).toString('base64url');
+  store.putCode(code, {
+    clientId: targetApp.clientId,
+    userId: user.oid,
+    redirectUri: p.redirect_uri,
+    scope: p.scope || 'openid profile',
+    nonce: p.nonce,
+    codeChallenge: p.code_challenge,
+    codeChallengeMethod: p.code_challenge_method || 'plain',
+    sid,
+    expiresAt: nowSec() + CODE_TTL,
+  });
+  return deliverAuthResponse(res, p.redirect_uri, mode, { code, state: p.state });
+}
+
 app.get('/:tenantId/oauth2/v2.0/authorize', validateTenant, (req, res) => {
   const db = store.snapshot();
   const p = {
@@ -646,11 +745,11 @@ app.get('/:tenantId/oauth2/v2.0/authorize', validateTenant, (req, res) => {
     });
   }
   if (p.prompt === 'none') {
-    return deliverAuthResponse(res, p.redirect_uri, mode, {
-      error: 'login_required',
-      error_description: 'AADSTS160021: The mock keeps no sign-in session, so silent (prompt=none) requests always require interaction.',
-      state: p.state,
-    });
+    const silent = resolveSilentAccount(db, targetApp, p, parseCookies(req)[SSO_COOKIE]);
+    if (silent.error) {
+      return deliverAuthResponse(res, p.redirect_uri, mode, { error: silent.error, error_description: `AADSTS${silent.aadsts}: ${silent.message}`, state: p.state });
+    }
+    return issueAuthCode(res, targetApp, p, mode, silent.user, silent.sid);
   }
 
   const hint = p.login_hint.toLowerCase();
@@ -724,19 +823,7 @@ app.post('/:tenantId/oauth2/v2.0/login-submit', validateTenant, (req, res) => {
     });
   }
 
-  store.purgeExpired();
-  const code = crypto.randomBytes(32).toString('base64url');
-  store.putCode(code, {
-    clientId: targetApp.clientId,
-    userId: user.oid,
-    redirectUri: p.redirect_uri,
-    scope: p.scope || 'openid profile',
-    nonce: p.nonce,
-    codeChallenge: p.code_challenge,
-    codeChallengeMethod: p.code_challenge_method || 'plain',
-    expiresAt: nowSec() + CODE_TTL,
-  });
-  return deliverAuthResponse(res, p.redirect_uri, mode, { code, state: p.state });
+  return issueAuthCode(res, targetApp, p, mode, user, null, parseCookies(req)[SSO_COOKIE]);
 });
 
 // --- /token ---
@@ -840,10 +927,11 @@ function handleAuthorizationCode(db, req, res, { clientId, clientSecret }) {
     scope: entry.scope,
     nonce: entry.nonce,
     usedSecret: Boolean(clientSecret),
+    sid: entry.sid,
   });
   if (entry.scope.split(/\s+/).includes('offline_access')) {
     const refresh = crypto.randomBytes(32).toString('base64url');
-    store.putRefresh(refresh, { clientId: targetApp.clientId, userId: user.oid, scope: entry.scope, expiresAt: nowSec() + REFRESH_TTL });
+    store.putRefresh(refresh, { clientId: targetApp.clientId, userId: user.oid, scope: entry.scope, sid: entry.sid, expiresAt: nowSec() + REFRESH_TTL });
     tokens.refresh_token = refresh;
   }
   return res.json(tokens);
@@ -865,9 +953,9 @@ function handleRefresh(db, req, res, { clientId, clientSecret }) {
   if (!user || !assignment) return oauthError(res, 400, 'invalid_grant', '50105', 'The user is no longer assigned to this application.');
 
   // Roles and lifetime are read fresh, so edits in the portal show up on the next refresh
-  const tokens = userTokens(db, { app: targetApp, user, roles: effectiveRoles(targetApp, assignment.roles), scope: entry.scope, usedSecret: Boolean(clientSecret) });
+  const tokens = userTokens(db, { app: targetApp, user, roles: effectiveRoles(targetApp, assignment.roles), scope: entry.scope, usedSecret: Boolean(clientSecret), sid: entry.sid });
   const next = crypto.randomBytes(32).toString('base64url');
-  store.putRefresh(next, { clientId: targetApp.clientId, userId: user.oid, scope: entry.scope, expiresAt: nowSec() + REFRESH_TTL });
+  store.putRefresh(next, { clientId: targetApp.clientId, userId: user.oid, scope: entry.scope, sid: entry.sid, expiresAt: nowSec() + REFRESH_TTL });
   tokens.refresh_token = next;
   return res.json(tokens);
 }
@@ -929,7 +1017,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err?.message || 'Internal error' });
 });
 
-const server = app.listen(PORT, () => {
+const server = (USE_HTTPS ? https.createServer({ cert: fs.readFileSync(HTTPS_CERT_FILE), key: fs.readFileSync(HTTPS_KEY_FILE) }, app) : http.createServer(app)).listen(PORT, () => {
   const db = store.snapshot();
   console.log('==========================================================');
   console.log(`Mock Entra ID Admin Portal : ${PUBLIC_URL}/`);

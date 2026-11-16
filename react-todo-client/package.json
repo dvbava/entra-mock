@@ -5,9 +5,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "concurrently \"node src\\server.js\" \"vite --port 5173\"",
-    "dev": "concurrently \"node src\\server.js\" \"vite --port 5173\"",
-    "server": "node server.js",
+    "start": "concurrently \"node src\\server.js\" \"vite\"",
+    "dev": "concurrently \"node src\\server.js\" \"vite\"",
+    "server": "node src\\server.js",
     "build": "vite build"
   },
   "dependencies": {

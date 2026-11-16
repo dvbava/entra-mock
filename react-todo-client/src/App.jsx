@@ -3,7 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { getMsalConfig, setAppOverride } from './authConfig.js';
 import { handleRedirectPromise, loginRedirect, logoutRedirect, parseEntraToken } from './entraAuth.js';
 
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = 'http://localhost:5010/api';
 
 export default function App() {
   const [cfg, setCfg] = useState(() => getMsalConfig());
@@ -170,7 +170,7 @@ export default function App() {
           <br/><br/>
           {error && <div className="error">{error}</div>}
           <a
-            href="http://localhost:8080/"
+            href="https://localhost:8080/"
             target="_blank"
             rel="noreferrer"
             style={{ position: 'absolute', bottom: '8px', right: '12px', fontSize: '10px', color: '#666', textDecoration: 'none' }}

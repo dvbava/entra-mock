@@ -4,14 +4,49 @@ import cors from 'cors';
 import { expressjwt as jwt } from 'express-jwt';
 import jwksRsa from 'jwks-rsa';
 import crypto from 'crypto';
+import fs from 'node:fs';
+import https from 'node:https';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const tenantId = process.env.ENTRA_TENANT_ID || '72f988bf-86f1-41af-91ab-2d7cd011db47';
-const clientId = process.env.ENTRA_CLIENT_ID || 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
-const authorityHost = process.env.ENTRA_AUTHORITY_HOST || 'http://localhost:8080';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectDir = path.resolve(__dirname, '..');
+const envFile = path.join(projectDir, '.env');
+if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
+
+const requiredConfig = [
+  'VITE_ENTRA_TENANT_ID',
+  'VITE_ENTRA_CLIENT_ID',
+  'VITE_ENTRA_AUTHORITY_HOST',
+  'API_PORT',
+];
+const missingConfig = requiredConfig.filter((name) => !process.env[name]);
+if (missingConfig.length) {
+  throw new Error(`Missing ${missingConfig.join(', ')} in ${envFile}`);
+}
+
+const tenantId = process.env.VITE_ENTRA_TENANT_ID;
+const clientId = process.env.VITE_ENTRA_CLIENT_ID;
+const authorityHost = process.env.VITE_ENTRA_AUTHORITY_HOST.replace(/\/$/, '');
+const authorityUrl = new URL(authorityHost);
+const authorityCertFile = process.env.ENTRA_AUTHORITY_CERT_FILE ||
+  (authorityUrl.hostname === 'localhost'
+    ? path.resolve(__dirname, '../../mock-entra-server/cert.pem')
+    : '');
+const resolvedAuthorityCertFile = authorityCertFile
+  ? path.resolve(projectDir, authorityCertFile)
+  : '';
+const requestAgent = authorityUrl.protocol === 'https:' && resolvedAuthorityCertFile && fs.existsSync(resolvedAuthorityCertFile)
+  ? new https.Agent({ ca: fs.readFileSync(resolvedAuthorityCertFile) })
+  : undefined;
+const PORT = Number(process.env.API_PORT);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error(`API_PORT must be an integer between 1 and 65535 in ${envFile}`);
+}
 
 // Cryptographic token validation via JWKS keys endpoint from the authority
 const checkJwt = jwt({
@@ -19,7 +54,8 @@ const checkJwt = jwt({
     cache: false,
     rateLimit: false,
     jwksRequestsPerMinute: 5,
-    jwksUri: `${authorityHost}/${tenantId}/discovery/v2.0/keys`
+    jwksUri: `${authorityHost}/${tenantId}/discovery/v2.0/keys`,
+    ...(requestAgent ? { requestAgent } : {}),
   }),
   audience: clientId,
   issuer: `${authorityHost}/${tenantId}/v2.0`,
@@ -81,7 +117,6 @@ app.delete('/api/todos/:id', checkJwt, (req, res) => {
   res.status(204).send();
 });
 
-const PORT = 5000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });

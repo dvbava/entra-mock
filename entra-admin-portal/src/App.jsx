@@ -110,9 +110,22 @@ export default function App() {
             <code>{info.authority}</code>
             <CopyButton text={info.authority} />
           </div>
-          <ConfirmButton small confirmLabel="Reset everything?" onConfirm={() => call('POST', '/reset').then((s) => s && notify('Demo data restored', 'ok'))}>
-            Reset demo data
-          </ConfirmButton>
+          <div className="topbar-actions">
+            <ConfirmButton
+              small
+              confirmLabel="Sign everyone out?"
+              onConfirm={() =>
+                request('DELETE', '/api/admin/sessions')
+                  .then(({ cleared }) => notify(cleared ? `Ended ${cleared} SSO ${cleared === 1 ? 'session' : 'sessions'}. Silent sign-in now returns login_required.` : 'No browser was signed in.', 'ok'))
+                  .catch((e) => notify(e.message))
+              }
+            >
+              End SSO sessions
+            </ConfirmButton>
+            <ConfirmButton small confirmLabel="Reset everything?" onConfirm={() => call('POST', '/reset').then((s) => s && notify('Demo data restored', 'ok'))}>
+              Reset demo data
+            </ConfirmButton>
+          </div>
         </header>
 
         <main className="content">
