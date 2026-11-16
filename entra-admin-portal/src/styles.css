@@ -37,8 +37,8 @@ a { color: var(--accent); }
 .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
 .logo { display: grid; grid-template-columns: 10px 10px; gap: 2px; }
 .logo i { display: block; height: 10px; }
-.logo i:nth-child(1) { background: #f25022; } .logo i:nth-child(2) { background: #7fba00; }
-.logo i:nth-child(3) { background: #00a4ef; } .logo i:nth-child(4) { background: #ffb900; }
+.logo i:nth-child(1) { background: #04775a; } .logo i:nth-child(2) { background: #04775a; }
+.logo i:nth-child(3) { background: #04775a; } .logo i:nth-child(4) { background: #04775a; }
 nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item { display: flex; justify-content: space-between; align-items: center; background: none; border: none; border-left: 3px solid transparent; padding: 9px 10px; border-radius: 0 var(--radius) var(--radius) 0; font: inherit; color: var(--ink); cursor: pointer; text-align: left; }
 .nav-item:hover { background: var(--bg); }

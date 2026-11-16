@@ -117,7 +117,6 @@ CREATE TABLE IF NOT EXISTS sso_sessions (
 );
 `;
 
-const DEMO_APP_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 function groupBy(rows, key) {
@@ -159,7 +158,7 @@ export function openStore({ dataDir }) {
     }
   };
 
-  // ----- settings -----
+  // ----- reads -----
   const getSetting = (key) => db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
   const setSetting = (key, value) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
 
@@ -209,112 +208,56 @@ export function openStore({ dataDir }) {
     };
   }
 
-  // ----- signing key (kept in the database so tokens stay valid across restarts) -----
   function signingKeyPem() {
     let pem = getSetting('signing_key_pem');
     if (pem) return pem;
-    const legacy = path.join(dataDir, 'signing-key.json');
-    if (fs.existsSync(legacy)) {
-      try {
-        pem = JSON.parse(fs.readFileSync(legacy, 'utf-8')).pem;
-        crypto.createPrivateKey(pem);
-        fs.renameSync(legacy, `${legacy}.migrated`);
-      } catch {
-        pem = undefined;
-      }
-    }
     pem ||= crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
     setSetting('signing_key_pem', pem);
     return pem;
   }
 
-  // ----- seeding / legacy import -----
   function seedDefaults() {
     const createdAt = new Date().toISOString();
+    const appOid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const trader1Oid = '11111111-1111-1111-1111-111111111111';
+    const trader2Oid = '22222222-2222-2222-2222-222222222222';
+
     tx(() => {
       const user = db.prepare('INSERT INTO users (oid, name, preferred_username) VALUES (?, ?, ?)');
-      user.run('11111111-1111-1111-1111-111111111111', 'Alice Reader', 'alice.reader@contoso.onmicrosoft.com');
-      user.run('22222222-2222-2222-2222-222222222222', 'Bob Writer', 'bob.writer@contoso.onmicrosoft.com');
-      user.run('33333333-3333-3333-3333-333333333333', 'Charlie Admin', 'charlie.admin@contoso.onmicrosoft.com');
+      user.run(trader1Oid, 'User-1', 'user-1@contoso.onmicrosoft.com');
+      user.run(trader2Oid, 'User-2', 'user-2@contoso.onmicrosoft.com');
 
-      db.prepare('INSERT INTO apps (client_id, name, token_lifetime_seconds, created_at) VALUES (?, ?, ?, ?)').run(DEMO_APP_ID, 'React Todo SPA', DEFAULT_LIFETIME, createdAt);
-      for (const r of ['RoleRead', 'RoleWrite', 'RoleAdmin']) db.prepare('INSERT INTO app_roles (app_id, role) VALUES (?, ?)').run(DEMO_APP_ID, r);
-      for (const u of ['http://localhost:5173/callback', 'http://localhost:5173']) db.prepare('INSERT INTO redirect_uris (app_id, uri) VALUES (?, ?)').run(DEMO_APP_ID, u);
-      db.prepare('INSERT INTO app_secrets (id, app_id, description, secret, created_at) VALUES (?, ?, ?, ?, ?)').run('sec-default-1', DEMO_APP_ID, 'Default Dev Secret', 'dev-secret-value-123', createdAt);
+      db.prepare('INSERT INTO apps (client_id, name, token_lifetime_seconds, created_at) VALUES (?, ?, ?, ?)').run(appOid, 'ToDo Application', DEFAULT_LIFETIME, createdAt);
+      
+      for (const r of ['RoleRead', 'RoleWrite']) {
+        db.prepare('INSERT INTO app_roles (app_id, role) VALUES (?, ?)').run(appOid, r);
+      }
+
+      for (const u of ['http://localhost:5173/callback', 'http://localhost:5173']) {
+        db.prepare('INSERT INTO redirect_uris (app_id, uri) VALUES (?, ?)').run(appOid, u);
+      }
+
+      db.prepare('INSERT INTO app_secrets (id, app_id, description, secret, created_at) VALUES (?, ?, ?, ?, ?)').run('sec-default-1', appOid, 'Default Dev Secret', 'dev-secret-value-123', createdAt);
+
       for (const [uid, role] of [
-        ['11111111-1111-1111-1111-111111111111', 'RoleRead'],
-        ['22222222-2222-2222-2222-222222222222', 'RoleWrite'],
-        ['33333333-3333-3333-3333-333333333333', 'RoleAdmin'],
+        [trader1Oid, 'RoleRead'],
+        [trader2Oid, 'RoleRead'],
+        [trader2Oid, 'RoleWrite'],
       ]) {
-        db.prepare('INSERT INTO assignments (app_id, user_id) VALUES (?, ?)').run(DEMO_APP_ID, uid);
-        db.prepare('INSERT INTO assignment_roles (app_id, user_id, role) VALUES (?, ?, ?)').run(DEMO_APP_ID, uid, role);
+        db.prepare('INSERT OR IGNORE INTO assignments (app_id, user_id) VALUES (?, ?)').run(appOid, uid);
+        db.prepare('INSERT INTO assignment_roles (app_id, user_id, role) VALUES (?, ?, ?)').run(appOid, uid, role);
       }
 
       const spId = 'sp-11111111-2222-3333-4444-555555555555';
-      db.prepare('INSERT INTO service_accounts (id, name, client_id, target_app_id) VALUES (?, ?, ?, ?)').run(spId, 'CI/CD Pipeline Worker', '99999999-8888-7777-6666-555555555555', DEMO_APP_ID);
-      db.prepare('INSERT INTO service_account_roles (sp_id, role) VALUES (?, ?)').run(spId, 'RoleAdmin');
+      db.prepare('INSERT INTO service_accounts (id, name, client_id, target_app_id) VALUES (?, ?, ?, ?)').run(spId, 'SchedulerWorker', '99999999-8888-7777-6666-555555555555', appOid);
+      db.prepare('INSERT INTO service_account_roles (sp_id, role) VALUES (?, ?)').run(spId, 'RoleWrite');
       db.prepare('INSERT INTO service_account_secrets (id, sp_id, description, secret, created_at) VALUES (?, ?, ?, ?, ?)').run('sp-sec-1', spId, 'Primary Pipeline Key', 'sp-secret-key-987', createdAt);
     });
   }
 
-  /** One-time import of the previous JSON file store (v1 and v2 layouts). */
-  function importLegacyJson() {
-    const jsonPath = path.join(dataDir, 'db.json');
-    if (!fs.existsSync(jsonPath)) return false;
-    let d;
-    try {
-      d = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-    } catch {
-      return false;
-    }
-    try {
-      tx(() => {
-      if (d.tenantId) setSetting('tenant_id', d.tenantId);
-      const userIds = new Set();
-      for (const u of d.users ?? []) {
-        db.prepare('INSERT OR IGNORE INTO users (oid, name, preferred_username) VALUES (?, ?, ?)').run(u.oid, u.name, u.preferred_username);
-        userIds.add(u.oid);
-      }
-      const appIds = new Map();
-      for (const a of d.apps ?? []) {
-        db.prepare('INSERT OR IGNORE INTO apps (client_id, name, token_lifetime_seconds, created_at) VALUES (?, ?, ?, ?)').run(a.clientId, a.name, DEFAULT_LIFETIME, new Date().toISOString());
-        const roles = new Set(a.roles ?? d.roles ?? []);
-        for (const asg of a.assignments ?? []) for (const r of asg.roles ?? []) roles.add(r);
-        for (const r of roles) db.prepare('INSERT OR IGNORE INTO app_roles (app_id, role) VALUES (?, ?)').run(a.clientId, r);
-        appIds.set(a.clientId, roles);
-        for (const uri of a.redirectUris ?? []) db.prepare('INSERT OR IGNORE INTO redirect_uris (app_id, uri) VALUES (?, ?)').run(a.clientId, uri);
-        for (const s of a.secrets ?? []) {
-          db.prepare('INSERT OR IGNORE INTO app_secrets (id, app_id, description, secret, created_at) VALUES (?, ?, ?, ?, ?)').run(s.id, a.clientId, s.description, s.secret, s.createdAt ?? new Date().toISOString());
-        }
-        for (const asg of a.assignments ?? []) {
-          if (!userIds.has(asg.userId)) continue;
-          db.prepare('INSERT OR IGNORE INTO assignments (app_id, user_id) VALUES (?, ?)').run(a.clientId, asg.userId);
-          for (const r of asg.roles ?? []) db.prepare('INSERT OR IGNORE INTO assignment_roles (app_id, user_id, role) VALUES (?, ?, ?)').run(a.clientId, asg.userId, r);
-        }
-      }
-      for (const sp of d.serviceAccounts ?? []) {
-        const target = appIds.has(sp.targetAppClientId) ? sp.targetAppClientId : null;
-        db.prepare('INSERT OR IGNORE INTO service_accounts (id, name, client_id, target_app_id) VALUES (?, ?, ?, ?)').run(sp.id, sp.name, sp.clientId, target);
-        for (const r of sp.roles ?? []) {
-          if (target && appIds.get(target).has(r)) db.prepare('INSERT OR IGNORE INTO service_account_roles (sp_id, role) VALUES (?, ?)').run(sp.id, r);
-        }
-        for (const s of sp.secrets ?? []) {
-          db.prepare('INSERT OR IGNORE INTO service_account_secrets (id, sp_id, description, secret, created_at) VALUES (?, ?, ?, ?, ?)').run(s.id, sp.id, s.description, s.secret, s.createdAt ?? new Date().toISOString());
-        }
-      }
-      });
-    } catch (err) {
-      console.error(`Could not import ${jsonPath} (${err.message}); starting from the default data instead.`);
-      return false;
-    }
-    fs.renameSync(jsonPath, `${jsonPath}.migrated`);
-    return true;
-  }
-
   if (!getSetting('initialized')) {
     setSetting('tenant_id', TENANT_ID);
-    const imported = importLegacyJson();
-    if (!imported) seedDefaults();
+    seedDefaults();
     setSetting('initialized', '1');
   }
 
@@ -442,7 +385,7 @@ export function openStore({ dataDir }) {
     },
 
     // ----- SSO sessions (the browser cookie maps to the accounts signed in on that browser) -----
-    /** Records that userId signed in on this browser session; returns that account's stable sid. */
+    /** Records that userId signed in on this browser session; returns that account's stable sid. */   
     signInSession(sessionId, userId, ttlSeconds) {
       return tx(() => {
         const existing = db.prepare('SELECT sid FROM sso_sessions WHERE session_id = ? AND user_id = ?').get(sessionId, userId);

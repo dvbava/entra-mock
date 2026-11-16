@@ -781,18 +781,15 @@ app.get('/:tenantId/oauth2/v2.0/authorize', validateTenant, (req, res) => {
 
   res.send(
     pageShell(
-      `Sign in - ${targetApp.name}`,
-      `<h1>Pick an account</h1>
-    <div class="meta">
-      <div><strong>Application:</strong> ${escapeHtml(targetApp.name)}</div>
-      <div><strong>Client ID:</strong> ${escapeHtml(targetApp.clientId)}</div>
-      <div><strong>Tenant ID:</strong> ${escapeHtml(req.resolvedTenantId)}</div>
-      <div><strong>Token lifetime:</strong> ${targetApp.tokenLifetimeSeconds}s</div>
-    </div>
+      `Sign in to your account`,
+      `<h1>Sign in</h1>
     <form method="POST" action="${escapeHtml(`${PUBLIC_URL}/${req.resolvedTenantId}/oauth2/v2.0/login-submit`)}">
       ${hidden}
       ${rows}
-      <div class="footer"><button type="submit" name="cancel" value="1" class="link">Cancel</button><a href="${escapeHtml(PUBLIC_URL)}/" target="_blank">Manage apps, users &amp; roles</a></div>
+      <div class="footer">
+        <button type="submit" name="cancel" value="1" class="link">Cancel</button>
+        <a href="${escapeHtml(PUBLIC_URL)}/" target="_blank">Manage apps &amp; users</a>
+      </div>
     </form>`
     )
   );
@@ -976,36 +973,158 @@ app.post('/:tenantId/oauth2/v2.0/token', validateTenant, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// HTML shell for the mock sign-in pages
+// HTML shell for the mock sign-in pages (Microsoft Entra ID Fluent UI style)
 // ---------------------------------------------------------------------------
 function pageShell(title, body) {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)}</title>
 <style>
-  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f2f2f2; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; margin: 0; padding: 48px 16px; box-sizing: border-box; color: #1b1b1b; }
-  .box { background: #fff; width: 440px; max-width: 100%; padding: 36px; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
-  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #5e5e5e; margin-bottom: 18px; font-size: 14px; }
-  .squares { display: grid; grid-template-columns: 9px 9px; gap: 2px; }
-  .squares span { height: 9px; }
-  .squares span:nth-child(1) { background: #f25022; } .squares span:nth-child(2) { background: #7fba00; }
-  .squares span:nth-child(3) { background: #00a4ef; } .squares span:nth-child(4) { background: #ffb900; }
-  h1 { font-size: 22px; font-weight: 600; margin: 0 0 10px; }
-  .meta { font-size: 12px; color: #616161; margin-bottom: 18px; line-height: 1.5; background: #f8f8f8; padding: 8px 10px; border-left: 3px solid #0067b8; word-break: break-all; }
-  .account-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px; background: #fff; border: none; border-bottom: 1px solid #e5e5e5; cursor: pointer; text-align: left; font: inherit; }
-  .account-row:hover, .account-row:focus-visible { background: #f3f2f1; outline: none; }
-  .avatar { width: 36px; height: 36px; border-radius: 50%; background: #0067b8; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; flex-shrink: 0; }
-  .details { flex: 1; min-width: 0; } .name { font-size: 14px; font-weight: 600; }
-  .upn { font-size: 12px; color: #616161; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .role-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 3px; background: #e1dfdd; color: #323130; }
-  .warn { background: #fff4ce; color: #795e00; padding: 14px; font-size: 13px; line-height: 1.5; }
-  .footer { margin-top: 16px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; }
-  .footer a, .footer .link { color: #0067b8; text-decoration: none; background: none; border: none; padding: 0; font: inherit; cursor: pointer; }
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    color: #1b1b1b;
+  }
+  .outer-box {
+    width: 440px;
+    max-width: 100%;
+    background: #fff;
+    padding: 44px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    box-sizing: border-box;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .squares {
+    display: grid;
+    grid-template-columns: 10px 10px;
+    gap: 2px;
+  }
+  .squares span { width: 10px; height: 10px; }
+  .squares span:nth-child(1) { background: #f25022; }
+  .squares span:nth-child(2) { background: #7fba00; }
+  .squares span:nth-child(3) { background: #00a4ef; }
+  .squares span:nth-child(4) { background: #ffb900; }
+  .brand-text {
+    font-size: 15px;
+    font-weight: 600;
+    color: #595959;
+  }
+  h1 {
+    font-size: 24px;
+    font-weight: 600;
+    margin: 0 0 8px 0;
+    color: #1b1b1b;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #605e5c;
+    margin-bottom: 24px;
+  }
+  .account-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid transparent;
+    border-radius: 0;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    margin-bottom: 4px;
+  }
+  .account-row:hover {
+    background: #f3f2f1;
+    border-color: #c8c6c4;
+  }
+  .avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #0078d4;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .details {
+    flex: 1;
+    min-width: 0;
+  }
+  .name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #323130;
+    line-height: 1.2;
+  }
+  .upn {
+    font-size: 12px;
+    color: #605e5c;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 2px;
+  }
+  .role-tag {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    background: #f3f2f1;
+    color: #605e5c;
+    border: 1px solid #c8c6c4;
+  }
+  .warn {
+    background: #fff4ce;
+    color: #323130;
+    padding: 16px;
+    font-size: 13px;
+    border: 1px solid #fde38a;
+    margin-bottom: 16px;
+    line-height: 1.4;
+  }
+  .footer {
+    margin-top: 24px;
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid #edebe9;
+    padding-top: 16px;
+  }
+  .footer a, .footer .link {
+    color: #0078d4;
+    text-decoration: none;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
+  .footer a:hover, .footer .link:hover {
+    text-decoration: underline;
+  }
 </style></head>
-<body><div class="box">
-  <div class="brand"><div class="squares"><span></span><span></span><span></span><span></span></div><span>Microsoft Entra ID (Mock)</span></div>
+<body><div class="outer-box">
+  <div class="brand">
+    <div class="squares"><span></span><span></span><span></span><span></span></div>
+    <span class="brand-text">Microsoft  <span class="role-tag">Development</span></span>
+  </div>
   ${body}
-</div></body></html>`;
+</div></body></html>`;  
 }
 
 // ---------------------------------------------------------------------------

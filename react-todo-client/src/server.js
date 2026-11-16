@@ -73,7 +73,7 @@ app.get('/api/todos', checkJwt, (req, res) => {
 
 app.post('/api/todos', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleWrite') && !roles.includes('RoleAdmin')) {
+  if (!roles.includes('RoleWrite')) {
     return res.status(403).json({ error: 'Forbidden: Requires RoleWrite or RoleAdmin' });
   }
 
@@ -89,7 +89,7 @@ app.post('/api/todos', checkJwt, (req, res) => {
 
 app.patch('/api/todos/:id', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleWrite') && !roles.includes('RoleAdmin')) {
+  if (!roles.includes('RoleWrite')) {
     return res.status(403).json({ error: 'Forbidden: Requires RoleWrite or RoleAdmin' });
   }
 
@@ -105,8 +105,8 @@ app.patch('/api/todos/:id', checkJwt, (req, res) => {
 
 app.delete('/api/todos/:id', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleAdmin')) {
-    return res.status(403).json({ error: 'Forbidden: Requires RoleAdmin' });
+  if (!roles.includes('RoleWrite')) {
+    return res.status(403).json({ error: 'Forbidden: Requires RoleWrite' });
   }
 
   const { id } = req.params;
