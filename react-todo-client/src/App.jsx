@@ -15,9 +15,6 @@ function BrandMark() {
 
 export default function App() {
   const [cfg, setCfg] = useState(() => getMsalConfig());
-  const [tenantInput, setTenantInput] = useState(cfg.auth.tenantId);
-  const [clientInput, setClientInput] = useState(cfg.auth.clientId);
-
   const [tokens, setTokens] = useState(() => {
     const saved = localStorage.getItem('entra_tokens');
     return saved ? JSON.parse(saved) : null;
@@ -29,17 +26,20 @@ export default function App() {
   const claims = tokens ? parseEntraToken(tokens.access_token) : null;
   const roles = Array.isArray(claims?.roles) ? claims.roles : [];
 
-  const canRead = roles.includes('RoleRead') || roles.includes('RoleWrite') || roles.includes('RoleAdmin');
-  const canWrite = roles.includes('RoleWrite') || roles.includes('RoleAdmin');
-  const isAdmin = roles.includes('RoleAdmin');
+  const canRead = roles.includes('RoleRead') || roles.includes('RoleWrite');
+  const canWrite = roles.includes('RoleWrite');
 
   const [todos, setTodos] = useState([]);
   const [todosLoading, setTodosLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState('');
+  const [priority, setPriority] = useState('medium');
+  const [category, setCategory] = useState('General');
+  const [dueDate, setDueDate] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
   const codeExchangedRef = useRef(false);
 
-  // The API is the single source of truth for the task list.
   const loadTodos = async (accessToken) => {
     const res = await fetch(`${API_BASE}/todos`, {
       headers: { Authorization: `Bearer ${accessToken}` }
@@ -77,19 +77,11 @@ export default function App() {
     }
   }, []);
 
-  const applyAppConfig = (e) => {
-    e.preventDefault();
-    setAppOverride(tenantInput, clientInput);
-    setCfg(getMsalConfig());
-    setError('');
-  };
-
   const showNotice = (msg) => {
     setNotice(msg);
     setTimeout(() => setNotice(''), 3000);
   };
 
-  // Always goes to the API: the client does not pre-check roles, the API decides (RoleWrite / RoleAdmin).
   const addTodo = async (e) => {
     e.preventDefault();
     const text = input.trim();
@@ -104,7 +96,7 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${tokens.access_token}`
         },
-        body: JSON.stringify({ text, done: false })
+        body: JSON.stringify({ text, priority, category, dueDate })
       });
       if (res.status === 401 || res.status === 403) {
         localStorage.removeItem('entra_tokens');
@@ -116,6 +108,7 @@ export default function App() {
         throw new Error(errData.error || 'Failed to create todo');
       }
       setInput('');
+      setDueDate('');
       await loadTodos(tokens.access_token);
     } catch (err) {
       setError(err.message);
@@ -125,7 +118,7 @@ export default function App() {
   };
 
   const toggleTodo = async (id) => {
-    if (!canWrite) return showNotice('403 Forbidden: Requires RoleWrite or RoleAdmin.');
+    if (!canWrite) return showNotice('403 Forbidden: Requires write permissions.');
     const todo = todos.find(t => t.id === id);
     if (!todo) return;
 
@@ -152,7 +145,7 @@ export default function App() {
   };
 
   const deleteTodo = async (id) => {
-    if (!isAdmin) return showNotice('403 Forbidden: Requires RoleAdmin.');
+    if (!canWrite) return showNotice('403 Forbidden: Requires write permissions.');
     try {
       const res = await fetch(`${API_BASE}/todos/${id}`, {
         method: 'DELETE',
@@ -190,7 +183,7 @@ export default function App() {
           <div className="brand"><BrandMark /><span>My Tasks</span></div>
           <h1>Sign in to continue</h1>
           <p className="lede">
-            Use your organisation account. What you can see and change in the task list depends on the app roles assigned to you.
+            Use your organizational account. Access levels are determined by your assigned app roles.
           </p>
           {error && (
             <div className="alert alert-error" role="alert">
@@ -201,9 +194,6 @@ export default function App() {
           <button className="btn btn-primary btn-block" onClick={() => loginRedirect().catch((e) => setError(e.message))}>
             Sign in with Microsoft Entra ID
           </button>
-          <a className="portal-link" href="https://localhost:8080/" target="_blank" rel="noreferrer">
-            Open Entra Admin Portal &rarr;
-          </a>
         </main>
       </div>
     );
@@ -211,6 +201,13 @@ export default function App() {
 
   const initials = (claims.name || claims.preferred_username || '?')
     .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  
+  const filteredTodos = todos.filter(t => {
+    const matchesFilter = filter === 'all' ? true : filter === 'open' ? !t.done : t.done;
+    const matchesSearch = t.text.toLowerCase().includes(searchTerm.toLowerCase()) || t.category.toLowerCase().includes(searchTerm.toLowerCase());
+    return matchesFilter && matchesSearch;
+  });
+
   const openCount = todos.filter((t) => !t.done).length;
   const doneCount = todos.length - openCount;
 
@@ -249,44 +246,88 @@ export default function App() {
         <div className="layout">
           <section className="panel" aria-labelledby="tasks-title">
             <div className="panel-head">
-              <h1 id="tasks-title">Tasks</h1>
+              <h1 id="tasks-title">Task Management</h1>
               <span className="count">{openCount} open &middot; {doneCount} completed</span>
             </div>
 
-            <form onSubmit={addTodo} className="add-form">
-              <label htmlFor="new-task" className="sr-only">New task</label>
+            {canWrite && (
+              <form onSubmit={addTodo} className="add-form-advanced">
+                <div className="form-row">
+                  <input
+                    type="text"
+                    placeholder="Task description"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    disabled={adding}
+                    autoComplete="off"
+                  />
+                  <select value={priority} onChange={(e) => setPriority(e.target.value)} disabled={adding}>
+                    <option value="low">Low Priority</option>
+                    <option value="medium">Medium Priority</option>
+                    <option value="high">High Priority</option>
+                  </select>
+                </div>
+                <div className="form-row">
+                  <input
+                    type="text"
+                    placeholder="Category (e.g. Security, Backend)"
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    disabled={adding}
+                  />
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    disabled={adding}
+                  />
+                  <button type="submit" className="btn btn-primary" disabled={adding || !input.trim()}>
+                    {adding ? 'Adding...' : 'Add Task'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="toolbar">
               <input
-                id="new-task"
                 type="text"
-                placeholder="Add a task"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                disabled={adding}
-                autoComplete="off"
+                placeholder="Search tasks..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="search-input"
               />
-              <button type="submit" className="btn btn-primary" disabled={adding || !input.trim()}>
-                {adding ? 'Adding…' : 'Add task'}
-              </button>
-            </form>
+              <div className="filter-tabs">
+                <button className={`btn-filter ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>All</button>
+                <button className={`btn-filter ${filter === 'open' ? 'active' : ''}`} onClick={() => setFilter('open')}>Open</button>
+                <button className={`btn-filter ${filter === 'completed' ? 'active' : ''}`} onClick={() => setFilter('completed')}>Completed</button>
+              </div>
+            </div>
 
             {todosLoading && todos.length === 0 ? (
-              <p className="muted state-msg" role="status">Loading tasks…</p>
-            ) : todos.length === 0 ? (
-              <p className="muted state-msg">No tasks yet. Add your first task above.</p>
+              <p className="muted state-msg" role="status">Loading tasks...</p>
+            ) : filteredTodos.length === 0 ? (
+              <p className="muted state-msg">No tasks found.</p>
             ) : (
               <ul className="tasks">
-                {todos.map((todo) => (
-                  <li key={todo.id} className={todo.done ? 'task done' : 'task'}>
-                    <label className="task-main" title={canWrite ? undefined : 'Requires RoleWrite or RoleAdmin'}>
+                {filteredTodos.map((todo) => (
+                  <li key={todo.id} className={`task ${todo.done ? 'done' : ''} priority-${todo.priority}`}>
+                    <label className="task-main" title={canWrite ? undefined : 'Requires write permissions'}>
                       <input
                         type="checkbox"
                         checked={todo.done}
                         onChange={() => toggleTodo(todo.id)}
                         disabled={!canWrite}
                       />
-                      <span className="task-text">{todo.text}</span>
+                      <div className="task-info">
+                        <span className="task-text">{todo.text}</span>
+                        <div className="task-meta">
+                          <span className="badge-cat">{todo.category}</span>
+                          <span className={`badge-prio prio-${todo.priority}`}>{todo.priority}</span>
+                          {todo.dueDate && <span className="due-date">Due: {todo.dueDate}</span>}
+                        </div>
+                      </div>
                     </label>
-                    {isAdmin && (
+                    {canWrite && (
                       <button className="btn btn-danger btn-sm" onClick={() => deleteTodo(todo.id)}>Delete</button>
                     )}
                   </li>
@@ -297,17 +338,16 @@ export default function App() {
 
           <aside className="side">
             <section className="panel" aria-labelledby="access-title">
-              <h2 id="access-title">Your access</h2>
-              <p className="muted small">Evaluated from the app roles in your token ({roles.join(', ') || 'None'}).</p>
+              <h2 id="access-title">Authorization Status</h2>
+              <p className="muted small">Model: Binary Roles ({roles.join(', ') || 'None'})</p>
               <dl className="access">
-                <div><dt>Read</dt><dd className={canRead ? 'yes' : 'no'}>{canRead ? 'Allowed' : 'Denied'}</dd></div>
-                <div><dt>Write</dt><dd className={canWrite ? 'yes' : 'no'}>{canWrite ? 'Allowed' : 'Denied'}</dd></div>
-                <div><dt>Admin (Delete)</dt><dd className={isAdmin ? 'yes' : 'no'}>{isAdmin ? 'Allowed' : 'Denied'}</dd></div>
+                <div><dt>Read Access</dt><dd className={canRead ? 'yes' : 'no'}>{canRead ? 'Allowed' : 'Denied'}</dd></div>
+                <div><dt>Write Access</dt><dd className={canWrite ? 'yes' : 'no'}>{canWrite ? 'Allowed' : 'Denied'}</dd></div>
               </dl>
               <p className="meta">Tenant <code>{claims.tid}</code></p>
               <p className="meta">App <code>{claims.aud}</code></p>
               <details className="token-box">
-                <summary>Inspect Entra v2.0 JWT Claims</summary>
+                <summary>Inspect JWT Claims</summary>
                 <pre>{JSON.stringify(claims, null, 2)}</pre>
               </details>
             </section>

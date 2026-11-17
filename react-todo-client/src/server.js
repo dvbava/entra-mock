@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 
 const app = express();
 app.use(cors());
@@ -62,58 +63,112 @@ const checkJwt = jwt({
   algorithms: ['RS256']
 });
 
-let todos = [
-  { id: '1', text: 'Register new app & assign users in Entra Admin Portal', done: true },
-  { id: '2', text: 'Test service-to-service client_credentials flow', done: false },
-];
+const dbFile = path.join(projectDir, 'todos.db');
+const db = new DatabaseSync(dbFile);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS todos (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    dueDate TEXT,
+    category TEXT NOT NULL DEFAULT 'General',
+    created_at TEXT NOT NULL
+  )
+`);
+
+const countRow = db.prepare('SELECT COUNT(*) as cnt FROM todos').get();
+if (countRow.cnt === 0) {
+  const insert = db.prepare('INSERT INTO todos (id, text, done, priority, dueDate, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  insert.run('1', 'Register new app & assign users in Entra Admin Portal', 1, 'high', '2026-06-01', 'Security', new Date().toISOString());
+  insert.run('2', 'Test service-to-service client_credentials flow', 0, 'medium', '2026-06-15', 'Backend', new Date().toISOString());
+}
 
 app.get('/api/todos', checkJwt, (req, res) => {
+  const rows = db.prepare('SELECT id, text, done, priority, dueDate, category, created_at FROM todos ORDER BY created_at DESC').all();
+  const todos = rows.map(r => ({
+    id: r.id,
+    text: r.text,
+    done: !!r.done,
+    priority: r.priority,
+    dueDate: r.dueDate || '',
+    category: r.category,
+    createdAt: r.created_at
+  }));
   res.json(todos);
 });
 
 app.post('/api/todos', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleWrite')) {
-    return res.status(403).json({ error: 'Forbidden: Requires RoleWrite or RoleAdmin' });
+  if (!roles.includes('OrpTsrWrite') && !roles.includes('RoleWrite') && !roles.includes('RoleAdmin')) {
+    return res.status(403).json({ error: 'Forbidden: Requires write permissions' });
   }
 
-  const { text, done } = req.body;
-  if (!text || typeof text !== 'string') {
+  const { text, priority, dueDate, category } = req.body;
+  if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'Task text is required' });
   }
 
-  const newTodo = { id: crypto.randomUUID(), text: text.trim(), done: !!done };
-  todos.unshift(newTodo);
-  res.status(201).json(newTodo);
+  const newTodo = {
+    id: crypto.randomUUID(),
+    text: text.trim(),
+    done: 0,
+    priority: ['low', 'medium', 'high'].includes(priority) ? priority : 'medium',
+    dueDate: dueDate || null,
+    category: category ? category.trim() : 'General',
+    createdAt: new Date().toISOString()
+  };
+
+  db.prepare('INSERT INTO todos (id, text, done, priority, dueDate, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(newTodo.id, newTodo.text, newTodo.done, newTodo.priority, newTodo.dueDate, newTodo.category, newTodo.createdAt);
+
+  res.status(201).json({
+    ...newTodo,
+    done: false
+  });
 });
 
 app.patch('/api/todos/:id', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleWrite')) {
-    return res.status(403).json({ error: 'Forbidden: Requires RoleWrite or RoleAdmin' });
+  if (!roles.includes('OrpTsrWrite') && !roles.includes('RoleWrite') && !roles.includes('RoleAdmin')) {
+    return res.status(403).json({ error: 'Forbidden: Requires write permissions' });
   }
 
   const { id } = req.params;
-  const todo = todos.find(t => t.id === id);
-  if (!todo) return res.status(404).json({ error: 'Todo not found' });
+  const row = db.prepare('SELECT * FROM todos WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Todo not found' });
 
-  if (typeof req.body.done === 'boolean') {
-    todo.done = req.body.done;
-  }
-  res.json(todo);
+  const done = typeof req.body.done === 'boolean' ? (req.body.done ? 1 : 0) : row.done;
+  const text = req.body.text !== undefined ? req.body.text.trim() : row.text;
+  const priority = req.body.priority !== undefined ? req.body.priority : row.priority;
+  const dueDate = req.body.dueDate !== undefined ? req.body.dueDate : row.dueDate;
+  const category = req.body.category !== undefined ? req.body.category : row.category;
+
+  db.prepare('UPDATE todos SET text = ?, done = ?, priority = ?, dueDate = ?, category = ? WHERE id = ?')
+    .run(text, done, priority, dueDate, category, id);
+
+  const updated = db.prepare('SELECT * FROM todos WHERE id = ?').get(id);
+  res.json({
+    id: updated.id,
+    text: updated.text,
+    done: !!updated.done,
+    priority: updated.priority,
+    dueDate: updated.dueDate || '',
+    category: updated.category,
+    createdAt: updated.created_at
+  });
 });
 
 app.delete('/api/todos/:id', checkJwt, (req, res) => {
   const roles = req.auth?.roles || [];
-  if (!roles.includes('RoleWrite')) {
-    return res.status(403).json({ error: 'Forbidden: Requires RoleWrite' });
+  if (!roles.includes('OrpTsrWrite') && !roles.includes('RoleWrite') && !roles.includes('RoleAdmin')) {
+    return res.status(403).json({ error: 'Forbidden: Requires write permissions' });
   }
 
   const { id } = req.params;
-  const index = todos.findIndex(t => t.id === id);
-  if (index === -1) return res.status(404).json({ error: 'Todo not found' });
+  const result = db.prepare('DELETE FROM todos WHERE id = ?').run(id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Todo not found' });
 
-  todos.splice(index, 1);
   res.status(204).send();
 });
 
